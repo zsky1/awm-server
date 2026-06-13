@@ -1,0 +1,14 @@
+# Project exclude paths
+/awm-ai-engine/target/
+/awm-app/target/
+/awm-common/target/
+/awm-dal/target/
+/awm-model/target/
+/awm-service/awm-service-agent/target/
+/awm-service/awm-service-chat/target/
+/awm-service/awm-service-knowledge/target/
+/awm-service/awm-service-mcp/target/
+/awm-service/awm-service-memory/target/
+/awm-service/awm-service-model-config/target/
+/awm-service/awm-service-task/target/
+/awm-web/target/

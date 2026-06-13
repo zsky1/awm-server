@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: awm-postgres
+    environment:
+      POSTGRES_DB: awm
+      POSTGRES_USER: awm
+      POSTGRES_PASSWORD: awm123
+    ports:
+      - "5432:5432"
+    volumes:
+      - awm-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: awm-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: awm-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - awm-qdrant:/qdrant/storage
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: awm-minio
+    environment:
+      MINIO_ROOT_USER: awm
+      MINIO_ROOT_PASSWORD: awm123456
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - awm-minio:/data
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+volumes:
+  awm-pgdata:
+  awm-qdrant:
+  awm-minio:
