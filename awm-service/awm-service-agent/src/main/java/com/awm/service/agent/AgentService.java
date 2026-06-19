@@ -167,6 +167,9 @@ public class AgentService {
         if (agent == null) {
             throw new RuntimeException("Agent not found: " + id);
         }
+        if (agent.getConfig() == null || agent.getConfig().isBlank()) {
+            return java.util.Collections.emptyMap();
+        }
         try {
             return objectMapper.readValue(agent.getConfig(), Map.class);
         } catch (JsonProcessingException e) {
