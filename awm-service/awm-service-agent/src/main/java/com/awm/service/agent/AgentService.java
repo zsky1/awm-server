@@ -102,7 +102,7 @@ public class AgentService {
         agent.setSupervisorId(dto.getSupervisorId());
         agent.setPersonaPrompt(dto.getPersonaPrompt());
         agent.setLifecycleStatus("active");
-        agent.setRuntimeStatus("offline");
+        agent.setRuntimeStatus("idle");
         agent.setModelConfigId(dto.getModelConfigId());
         agent.setConfig("{}");
 

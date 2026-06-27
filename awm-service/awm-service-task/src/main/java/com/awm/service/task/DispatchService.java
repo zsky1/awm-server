@@ -7,12 +7,16 @@ import com.awm.dal.mapper.AgentMapper;
 import com.awm.dal.mapper.ChatGroupMapper;
 import com.awm.dal.mapper.ChatGroupMemberMapper;
 import com.awm.dal.mapper.McpServerMapper;
+import com.awm.dal.mapper.ModelConfigMapper;
 import com.awm.model.entity.Agent;
 import com.awm.model.entity.ChatGroup;
 import com.awm.model.entity.ChatGroupMember;
 import com.awm.model.entity.McpServer;
+import com.awm.model.entity.Message;
+import com.awm.model.entity.ModelConfig;
 import com.awm.model.entity.Task;
 import com.awm.model.vo.TaskVO;
+import com.awm.service.agent.AgentService;
 import com.awm.service.agent.ConfigLoader;
 import com.awm.service.chat.DispatchTaskEvent;
 import com.awm.service.chat.MessageService;
@@ -39,6 +43,8 @@ public class DispatchService {
     private final ChatGroupMapper chatGroupMapper;
     private final ChatGroupMemberMapper chatGroupMemberMapper;
     private final McpServerMapper mcpServerMapper;
+    private final ModelConfigMapper modelConfigMapper;
+    private final AgentService agentService;
     private final TaskService taskService;
     private final MessageService messageService;
     private final ConfigLoader configLoader;
@@ -124,9 +130,21 @@ public class DispatchService {
             memberSkills.add(skillInfo);
         }
 
-        // 3. 构建 Prompt 让总管拆解任务
+        // 3. 获取最近群聊历史（用于上下文注入，支持 P1-1）
+        List<Message> recentHistory = messageService.getRecentMessages(groupId, 20);
+        List<MessageItem> historyItems = recentHistory.stream()
+                .map(m -> {
+                    if ("user".equals(m.getSenderType())) {
+                        return MessageItem.user(m.getContent());
+                    } else {
+                        return MessageItem.assistant(m.getContent());
+                    }
+                })
+                .toList();
+
+        // 4. 构建 Prompt 让总管拆解任务
         String dispatchPrompt = promptBuilder.buildDispatcherPrompt(
-                group.getName(), memberSkills, userMessage);
+                group.getName(), memberSkills, userMessage, historyItems);
 
         // 定义 assign_task 函数
         Map<String, Object> assignTaskParams = new HashMap<>();
@@ -147,7 +165,13 @@ public class DispatchService {
                 assignTaskParams
         );
 
-        ChatRequest request = ChatRequest.of(null, dispatchPrompt, List.of());
+        ChatRequest request = ChatRequest.of(
+                resolveModelName(manager),
+                dispatchPrompt,
+                List.of(),
+                resolveApiKey(manager),
+                resolveBaseUrl(manager)
+        );
 
         // 4. 调用 LLM 让总管拆解任务
         ChatResponse response = llmClient.chatWithTools(request, List.of(assignTool));
@@ -197,6 +221,14 @@ public class DispatchService {
                     subTask.setProgress(0);
                     taskService.createTask(subTask);
 
+                    // 先在群里发 @指派消息
+                    String assignMsg = "@" + agentName + " 请处理以下任务：" + title + "\n" + (description != null ? description : "");
+                    messageService.saveAgentMessageWithMetadata(
+                            groupId, manager.getId(), manager.getName(),
+                            assignMsg, "at_assign",
+                            Map.of("mentionedAgentId", assignedAgent.getId(), "mentionedAgentName", agentName)
+                    );
+
                     // 6. 通知 Agent 开始执行（异步）
                     executeSubTask(subTask.getId(), assignedAgent.getId());
 
@@ -209,9 +241,14 @@ public class DispatchService {
             messageService.saveAgentMessage(groupId, manager.getId().toString(),
                     manager.getName(), "任务已拆解并分配，请各位开始执行。", "text");
         } else {
-            // 总管直接回复
-            messageService.saveAgentMessage(groupId, manager.getId().toString(),
-                    manager.getName(), response.content(), "text");
+            // 无匹配角色 → 总管直接回复
+            String fallbackContent = response.content() != null ? response.content()
+                    : "目前团队还没有负责这个任务的员工，我来直接解答。";
+            messageService.saveAgentMessageWithMetadata(
+                    groupId, manager.getId(), manager.getName(),
+                    fallbackContent, "text",
+                    Map.of("fallback", true)
+            );
         }
     }
 
@@ -225,14 +262,18 @@ public class DispatchService {
      * 6. 更新 Task 状态和进度
      */
     public void executeSubTask(String taskId, String agentId) {
-        // 更新任务状态
+        // 更新任务状态 + Agent 运行时状态为忙碌
         taskService.updateTaskStatus(taskId, "in_progress");
+        agentService.updateStatus(agentId, "busy");
 
         try {
             // 1. ConfigLoader 加载 Agent 配置
             ConfigLoader.AgentRuntime runtime = configLoader.loadAgentRuntime(agentId);
 
-            // 2. 构建 ChatRequest
+            // 2. 获取 Agent 实体
+            Agent agent = runtime.agent();
+
+            // 3. 构建 ChatRequest
             TaskVO taskVO = taskService.getTaskById(taskId);
             final String taskGroupId = taskVO.getGroupId(); // 缓存 groupId，避免反复查询
 
@@ -249,23 +290,33 @@ public class DispatchService {
                     ))
                     .toList();
 
-            ChatRequest chatRequest = ChatRequest.of(null, runtime.systemPrompt(), messages);
+            ChatRequest chatRequest = ChatRequest.of(
+                    resolveModelName(agent),
+                    runtime.systemPrompt(),
+                    messages,
+                    resolveApiKey(agent),
+                    resolveBaseUrl(agent)
+            );
 
-            // 3. 流式执行
-            Agent agent = runtime.agent();
+            // 4. 流式执行
             StringBuilder fullContent = new StringBuilder();
             // 累积流式 tool_call 片段：key=toolCallId, value=[name, accumulatedArgs]
             Map<String, String[]> toolCallAccumulator = new HashMap<>();
 
             llmClient.chatStream(chatRequest)
                     .doOnNext(chunk -> {
+                        // 推理内容转发（reasoning）
+                        if (chunk.isReasoning() && chunk.reasoning() != null) {
+                            sseManager.pushEventToGroup(taskGroupId, "agent_reasoning",
+                                formatEventData(agent.getId(), agent.getName(), chunk.reasoning(), taskId));
+                        }
                         if (chunk.content() != null) {
                             fullContent.append(chunk.content());
                             // 4. SSE 推送流式内容
                             sseManager.pushEventToGroup(
                                     taskGroupId,
                                     "agent_message",
-                                    formatStreamData(agent.getName(), chunk.content())
+                                    formatEventData(agent.getId(), agent.getName(), chunk.content(), taskId)
                             );
                         }
                         if (chunk.toolCall() != null) {
@@ -298,9 +349,10 @@ public class DispatchService {
                             handleToolCall(taskId, taskGroupId, agentId, completeToolCall);
                         }
 
-                        // 6. 更新 Task 状态
+                        // 6. 更新 Task 状态 + Agent 运行时状态恢复空闲
                         taskService.updateTaskStatus(taskId, "completed");
                         taskService.updateTaskProgress(taskId, 100);
+                        agentService.updateStatus(agentId, "idle");
 
                         // 保存完整消息
                         messageService.saveAgentMessage(
@@ -314,12 +366,14 @@ public class DispatchService {
                     .doOnError(e -> {
                         log.error("Agent task execution failed: taskId={}, agentId={}", taskId, agentId, e);
                         taskService.updateTaskStatus(taskId, "failed");
+                        agentService.updateStatus(agentId, "error");
                     })
                     .subscribe();
 
         } catch (Exception e) {
             log.error("Failed to execute sub task: {}", taskId, e);
             taskService.updateTaskStatus(taskId, "failed");
+            agentService.updateStatus(agentId, "error");
         }
     }
 
@@ -345,15 +399,84 @@ public class DispatchService {
         }
     }
 
-    private String formatStreamData(String agentName, String content) {
+    private String formatEventData(String agentId, String agentName, String content, String taskId) {
         try {
-            Map<String, String> data = Map.of(
-                    "agentName", agentName,
-                    "content", content
-            );
+            Map<String, String> data = new LinkedHashMap<>();
+            data.put("agentId", agentId);
+            data.put("agentName", agentName);
+            data.put("content", content);
+            if (taskId != null) data.put("taskId", taskId);
             return objectMapper.writeValueAsString(data);
         } catch (Exception e) {
             return content;
         }
+    }
+
+    /**
+     * 解析 Agent 的模型配置（优先 Agent.modelConfigId，回退到数据库默认配置）
+     * @return ModelConfig 或 null（如果数据库没有配置）
+     */
+    private ModelConfig resolveModelConfig(Agent agent) {
+        if (agent == null) return null;
+
+        // 1. 优先使用 Agent 绑定的 modelConfigId
+        if (agent.getModelConfigId() != null && !agent.getModelConfigId().isBlank()) {
+            ModelConfig config = modelConfigMapper.selectById(agent.getModelConfigId());
+            if (config != null) {
+                log.info("Agent[{}] 使用绑定模型配置: model={}, baseUrl={}, apiKey={}****",
+                        agent.getName(), config.getModel(), config.getBaseUrl(),
+                        config.getApiKey() != null ? config.getApiKey().substring(Math.max(0, config.getApiKey().length() - 4)) : "null");
+                return config;
+            }
+            log.warn("Agent {} 的 modelConfigId={} 在数据库中不存在，尝试使用默认配置", agent.getId(), agent.getModelConfigId());
+        }
+
+        // 2. 回退到数据库默认模型配置
+        List<ModelConfig> defaults = modelConfigMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ModelConfig>()
+                        .eq(ModelConfig::getIsDefault, true));
+        if (!defaults.isEmpty()) {
+            ModelConfig config = defaults.get(0);
+            log.info("Agent[{}] 使用默认模型配置: model={}, baseUrl={}, apiKey={}****",
+                    agent.getName(), config.getModel(), config.getBaseUrl(),
+                    config.getApiKey() != null ? config.getApiKey().substring(Math.max(0, config.getApiKey().length() - 4)) : "null");
+            return config;
+        }
+
+        log.warn("Agent[{}] 未找到数据库模型配置，将回退到 application.yml", agent.getName());
+        return null;
+    }
+
+    /**
+     * 解析模型名称
+     */
+    private String resolveModelName(Agent agent) {
+        ModelConfig config = resolveModelConfig(agent);
+        if (config != null && config.getModel() != null && !config.getModel().isBlank()) {
+            return config.getModel();
+        }
+        return null; // null → OpenAiLlmClient 回退到 application.yml
+    }
+
+    /**
+     * 解析 API Key
+     */
+    private String resolveApiKey(Agent agent) {
+        ModelConfig config = resolveModelConfig(agent);
+        if (config != null && config.getApiKey() != null && !config.getApiKey().isBlank()) {
+            return config.getApiKey();
+        }
+        return null; // null → OpenAiLlmClient 回退到 application.yml
+    }
+
+    /**
+     * 解析 Base URL
+     */
+    private String resolveBaseUrl(Agent agent) {
+        ModelConfig config = resolveModelConfig(agent);
+        if (config != null && config.getBaseUrl() != null && !config.getBaseUrl().isBlank()) {
+            return config.getBaseUrl();
+        }
+        return null; // null → OpenAiLlmClient 回退到 application.yml
     }
 }

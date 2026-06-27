@@ -3,6 +3,8 @@ package com.awm.ai.prompt;
 import com.awm.model.entity.Agent;
 import org.springframework.stereotype.Component;
 
+import com.awm.ai.model.MessageItem;
+
 import java.util.List;
 import java.util.Map;
 
@@ -78,10 +80,23 @@ public class PromptBuilder {
 
     /**
      * 构建总管调度 Prompt
+     *
+     * @param groupName     群名称
+     * @param memberSkills  群成员及技能列表
+     * @param userTask      用户任务内容
+     * @param chatHistory   最近群聊上下文（可为空）
+     * @return 调度 Prompt
      */
-    public String buildDispatcherPrompt(String groupName, List<Map<String, Object>> memberSkills, String userTask) {
+    public String buildDispatcherPrompt(String groupName, List<Map<String, Object>> memberSkills,
+                                         String userTask, List<MessageItem> chatHistory) {
         StringBuilder sb = new StringBuilder();
-        sb.append("你是群聊「").append(groupName).append("」的任务总管。\n\n");
+        sb.append("你是群聊「").append(groupName).append("」的总裁助理/秘书。\n\n");
+        sb.append("你的职责是时刻服务总裁：\n");
+        sb.append("- 收到任何消息都要第一时间响应，不需要等总裁 @ 你\n");
+        sb.append("- 简单问候或闲聊时，直接友好回复\n");
+        sb.append("- 简单问题直接解答，复杂任务拆解分派给对应员工\n");
+        sb.append("- 记住上下文，同样的问题不要重复问，不要复述历史对话内容\n");
+        sb.append("- 任务完成后总结归档，必要时主动汇报进度\n\n");
         sb.append("## 群成员及其技能\n");
         for (Map<String, Object> member : memberSkills) {
             String name = (String) member.getOrDefault("name", "");
@@ -98,8 +113,28 @@ public class PromptBuilder {
         }
         sb.append("\n## 用户任务\n");
         sb.append(userTask).append("\n\n");
-        sb.append("请将以上任务拆解为子任务，并分配给最合适的群成员。");
-        sb.append("使用 assign_task 函数为每个子任务指定执行人和描述。\n");
+
+        // 追加最近群聊上下文
+        if (chatHistory != null && !chatHistory.isEmpty()) {
+            sb.append("## 最近群聊上下文\n");
+            int maxHistory = Math.min(chatHistory.size(), 20); // 最多显示最近20条
+            List<MessageItem> recent = chatHistory.subList(
+                    chatHistory.size() - maxHistory, chatHistory.size());
+            for (MessageItem item : recent) {
+                String roleLabel = switch (item.role()) {
+                    case "user" -> "用户";
+                    case "assistant" -> "AI";
+                    default -> item.role();
+                };
+                sb.append("- [").append(roleLabel).append("]: ").append(item.content()).append("\n");
+            }
+            sb.append("\n");
+        }
+
+        sb.append("请根据以上内容和上下文，决定如何响应：\n");
+        sb.append("- 如果是简单对话或可自己解答的问题，直接在 content 中回复，不要调用 assign_task\n");
+        sb.append("- 如果需要指派员工处理的任务，使用 assign_task 函数分配\n");
+        sb.append("- 如果没有合适的员工，直接回答并告知总裁\n");
         return sb.toString();
     }
 }

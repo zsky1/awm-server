@@ -10,6 +10,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -75,7 +77,7 @@ public class MessageService {
     public IPage<Message> pageMessages(String groupId, int page, int size) {
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
                 .eq(Message::getGroupId, groupId)
-                .orderByDesc(Message::getCreatedAt);
+                .orderByAsc(Message::getCreatedAt);
         return messageMapper.selectPage(new Page<>(page, size), wrapper);
     }
 
@@ -84,5 +86,26 @@ public class MessageService {
      */
     public Message getMessageById(String id) {
         return messageMapper.selectById(id);
+    }
+
+    /**
+     * 保存 Agent 消息（带 metadata）
+     */
+    public Message saveAgentMessageWithMetadata(String groupId, String agentId,
+            String agentName, String content, String messageType, Map<String, Object> metadata) {
+        return saveMessage(groupId, "agent", agentId, agentName, content, messageType, metadata);
+    }
+
+    /**
+     * 获取群内最近 N 条消息（按时间升序）
+     */
+    public List<Message> getRecentMessages(String groupId, int limit) {
+        LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
+                .eq(Message::getGroupId, groupId)
+                .orderByDesc(Message::getCreatedAt)
+                .last("LIMIT " + limit);
+        List<Message> list = messageMapper.selectList(wrapper);
+        Collections.reverse(list); // 按时间升序排列
+        return list;
     }
 }

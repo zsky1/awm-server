@@ -114,7 +114,7 @@ public class ChatGroupService {
     public PageResult<MessageVO> getMessages(String groupId, int page, int size) {
         LambdaQueryWrapper<Message> wrapper = new LambdaQueryWrapper<Message>()
                 .eq(Message::getGroupId, groupId)
-                .orderByDesc(Message::getCreatedAt);
+                .orderByAsc(Message::getCreatedAt);
 
         IPage<Message> messagePage = messageService.pageMessages(groupId, page, size);
 
@@ -130,9 +130,9 @@ public class ChatGroupService {
      */
     @Transactional
     public MessageVO sendMessage(String groupId, MessageSendDTO dto) {
-        // 保存消息
-        Message message = messageService.saveMessage(groupId, "user", null,
-                null, dto.getContent(), dto.getMessageType(), null);
+        // 保存消息 — 当前登录用户为"总裁"角色
+        Message message = messageService.saveMessage(groupId, "user", "president",
+                "总裁", dto.getContent(), dto.getMessageType(), null);
 
         // 处理用户消息
         processUserMessage(groupId, dto.getContent());
@@ -142,9 +142,9 @@ public class ChatGroupService {
 
     /**
      * 处理用户消息
-     * 1. 检查是否 @总管
+     * 1. 检查是否 @总管（支持 "@总管" 或 "@经理名"）
      * 2. 如果是，调用 DispatchService 进行任务调度
-     * 3. 如果不是，作为普通对话处理
+     * 3. 如果不是，静默返回不触发
      */
     public void processUserMessage(String groupId, String message) {
         // 获取群内总管
@@ -158,13 +158,9 @@ public class ChatGroupService {
             return;
         }
 
-        // 检查是否 @总管
-        String mentionPattern = "@" + manager.getName();
-        if (message.contains(mentionPattern)) {
-            // 发布任务调度事件
-            eventPublisher.publishEvent(new DispatchTaskEvent(groupId, message));
-        }
-        // 普通对话处理可在此扩展
+        // 总管作为总裁助理，时刻监听群内消息，第一时间响应
+        // 由 LLM 自主判断：简单对话直接回复，复杂任务拆解分派
+        eventPublisher.publishEvent(new DispatchTaskEvent(groupId, message));
     }
 
     private GroupVO toGroupVO(ChatGroup group) {

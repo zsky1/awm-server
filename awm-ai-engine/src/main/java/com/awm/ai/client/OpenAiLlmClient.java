@@ -37,12 +37,12 @@ public class OpenAiLlmClient implements LlmClient {
     @Override
     public ChatResponse chat(ChatRequest request) {
         ObjectNode requestBody = buildRequestBody(request, false, null);
-        String url = aiEngineConfig.getLlm().getBaseUrl() + "/chat/completions";
+        String url = resolveBaseUrl(request) + "/chat/completions";
 
         OkHttpClient client = buildHttpClient();
         Request httpRequest = new Request.Builder()
                 .url(url)
-                .addHeader("Authorization", "Bearer " + aiEngineConfig.getLlm().getApiKey())
+                .addHeader("Authorization", "Bearer " + resolveApiKey(request))
                 .addHeader("Content-Type", "application/json")
                 .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
                 .build();
@@ -62,13 +62,13 @@ public class OpenAiLlmClient implements LlmClient {
     @Override
     public Flux<ChatChunk> chatStream(ChatRequest request) {
         ObjectNode requestBody = buildRequestBody(request, true, null);
-        String url = aiEngineConfig.getLlm().getBaseUrl() + "/chat/completions";
+        String url = resolveBaseUrl(request) + "/chat/completions";
 
         return Flux.create((FluxSink<ChatChunk> sink) -> {
             OkHttpClient client = buildHttpClient();
             Request httpRequest = new Request.Builder()
                     .url(url)
-                    .addHeader("Authorization", "Bearer " + aiEngineConfig.getLlm().getApiKey())
+                    .addHeader("Authorization", "Bearer " + resolveApiKey(request))
                     .addHeader("Content-Type", "application/json")
                     .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
                     .build();
@@ -106,6 +106,10 @@ public class OpenAiLlmClient implements LlmClient {
                                             if (contentNode != null && !contentNode.isNull()) {
                                                 sink.next(ChatChunk.text(contentNode.asText()));
                                             }
+                                            JsonNode reasoningNode = delta.get("reasoning_content");
+                                            if (reasoningNode != null && !reasoningNode.isNull()) {
+                                                sink.next(ChatChunk.reasoning(reasoningNode.asText()));
+                                            }
                                             JsonNode toolCallsNode = delta.get("tool_calls");
                                             if (toolCallsNode != null && toolCallsNode.isArray() && !toolCallsNode.isEmpty()) {
                                                 JsonNode tc = toolCallsNode.get(0);
@@ -138,12 +142,12 @@ public class OpenAiLlmClient implements LlmClient {
     @Override
     public ChatResponse chatWithTools(ChatRequest request, List<ToolDefinition> tools) {
         ObjectNode requestBody = buildRequestBody(request, false, tools);
-        String url = aiEngineConfig.getLlm().getBaseUrl() + "/chat/completions";
+        String url = resolveBaseUrl(request) + "/chat/completions";
 
         OkHttpClient client = buildHttpClient();
         Request httpRequest = new Request.Builder()
                 .url(url)
-                .addHeader("Authorization", "Bearer " + aiEngineConfig.getLlm().getApiKey())
+                .addHeader("Authorization", "Bearer " + resolveApiKey(request))
                 .addHeader("Content-Type", "application/json")
                 .post(RequestBody.create(requestBody.toString(), JSON_MEDIA_TYPE))
                 .build();
@@ -162,7 +166,7 @@ public class OpenAiLlmClient implements LlmClient {
 
     private ObjectNode buildRequestBody(ChatRequest request, boolean stream, List<ToolDefinition> tools) {
         ObjectNode body = objectMapper.createObjectNode();
-        body.put("model", request.model() != null ? request.model() : aiEngineConfig.getLlm().getModel());
+        body.put("model", resolveModel(request));
         body.put("stream", stream);
 
         ArrayNode messages = body.putArray("messages");
@@ -258,5 +262,35 @@ public class OpenAiLlmClient implements LlmClient {
                 .readTimeout(300, TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)
                 .build();
+    }
+
+    /**
+     * 解析 API Key：优先使用 ChatRequest 携带的（来自数据库 model_config），回退到 application.yml
+     */
+    private String resolveApiKey(ChatRequest request) {
+        if (request.apiKey() != null && !request.apiKey().isBlank()) {
+            return request.apiKey();
+        }
+        return aiEngineConfig.getLlm().getApiKey();
+    }
+
+    /**
+     * 解析 Base URL：优先使用 ChatRequest 携带的，回退到 application.yml
+     */
+    private String resolveBaseUrl(ChatRequest request) {
+        if (request.baseUrl() != null && !request.baseUrl().isBlank()) {
+            return request.baseUrl();
+        }
+        return aiEngineConfig.getLlm().getBaseUrl();
+    }
+
+    /**
+     * 解析模型名称：优先使用 ChatRequest 携带的，回退到 application.yml
+     */
+    private String resolveModel(ChatRequest request) {
+        if (request.model() != null && !request.model().isBlank()) {
+            return request.model();
+        }
+        return aiEngineConfig.getLlm().getModel();
     }
 }
